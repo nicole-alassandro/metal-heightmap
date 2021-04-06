@@ -17,6 +17,7 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <GLKit/GLKit.h>
 
 #include <math.h>
 

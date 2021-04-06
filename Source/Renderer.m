@@ -14,13 +14,24 @@
 // with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 typedef struct FrameUniforms {
-    simd_float4x4 projectionViewModel;
+    simd_float4x4 modelMatrix;
+    simd_float4x4 perspectiveMatrix;
 } FrameUniforms;
 
 typedef struct vertex {
-    float pos[3];
-    unsigned char color[4];
+    float pos[2];
+    float tex[2];
 } vertex;
+
+simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
+{
+    return (simd_float4x4) {
+        (simd_float4){mat.m00, mat.m01, mat.m02, mat.m03},
+        (simd_float4){mat.m10, mat.m11, mat.m12, mat.m13},
+        (simd_float4){mat.m20, mat.m21, mat.m22, mat.m23},
+        (simd_float4){mat.m30, mat.m31, mat.m32, mat.m33},
+    };
+}
 
 @interface Renderer : NSObject<MTKViewDelegate>
 @end
@@ -33,6 +44,7 @@ typedef struct vertex {
     id<MTLDepthStencilState>   _depthState;
     id<MTLBuffer>              _uniformBuffer;
     id<MTLBuffer>              _vertfexBuffer;
+    id<MTLTexture>             _heightmap;
 
     long frameNum;
 }
@@ -44,7 +56,26 @@ typedef struct vertex {
     view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     view.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
 
-    NSError * error = nil;
+    NSError* error = nil;
+
+    _heightmap = [
+        [[MTKTextureLoader alloc] initWithDevice:_device]
+        newTextureWithContentsOfURL:[
+            NSURL
+            fileURLWithPath:[
+                [NSBundle mainBundle]
+                pathForResource:@"heightmap"
+                ofType:@"png"
+            ]
+        ]
+        options:nil
+        error:&error
+    ];
+
+    if (!_heightmap) {
+        NSLog(@"Failed to load heightmap: %@", error);
+        [NSApp terminate:self];
+    }
 
     _library = [
         _device
@@ -72,13 +103,9 @@ typedef struct vertex {
     ];
 
     MTLVertexDescriptor* vertDesc = [MTLVertexDescriptor new];
-    vertDesc.attributes[VertexAttributePosition].format = MTLVertexFormatFloat3;
-    vertDesc.attributes[VertexAttributePosition].offset = 0;
-    vertDesc.attributes[VertexAttributePosition].bufferIndex = MeshVertexBuffer;
-
-    vertDesc.attributes[VertexAttributeColor].format = MTLVertexFormatUChar4;
-    vertDesc.attributes[VertexAttributeColor].offset = SIZEOF_VERTEX_POS;
-    vertDesc.attributes[VertexAttributeColor].bufferIndex = MeshVertexBuffer;
+    vertDesc.attributes[0].format = MTLVertexFormatFloat2;
+    vertDesc.attributes[0].offset = 0;
+    vertDesc.attributes[0].bufferIndex = MeshVertexBuffer;
 
     vertDesc.layouts[MeshVertexBuffer].stride = sizeof(vertex);
     vertDesc.layouts[MeshVertexBuffer].stepRate = 1;
@@ -104,18 +131,21 @@ typedef struct vertex {
         [NSApp terminate:self];
     }
 
-    vertex verts[3] = {
+    vertex verts[5] = {
         (vertex){
-            .pos={-0.5f, -0.5f, 0.0f},
-            .color={255, 0, 0, 255},
+            .pos={-0.5f, -0.5f},
         },
         (vertex){
-            .pos={0.0f, 0.5f, 0.0f},
-            .color={0, 255, 0, 255},
+            .pos={-0.5f, 0.5f},
         },
         (vertex){
-            .pos={0.5f, -0.5f, 0.0f},
-            .color={0, 0, 255, 255},
+            .pos={0.5f, 0.5f},
+        },
+        (vertex){
+            .pos={0.5f, -0.5f},
+        },
+        (vertex){
+            .pos={-0.5f, -0.5f},
         },
     };
 
@@ -148,24 +178,50 @@ typedef struct vertex {
     frameNum++;
 
     {
-        const float foo = sinf((float)frameNum / 12.0f);
+        simd_float4x4 perspective;
 
-        const float rad = (float)frameNum * 0.01f;
-        const float rotation_y = sinf(rad) + foo;
-        const float rotation_x = cosf(rad) + foo;
+        {
+            const float nearZ = 0.01f;
+            const float farZ  = 100.0f;
 
-        const simd_float4x4 rotation = (simd_float4x4){
-            (simd_float4){rotation_x, -rotation_y, 0.0f, 0.0f},
-            (simd_float4){rotation_y,  rotation_x, 0.0f, 0.0f},
-            (simd_float4){      0.0f,       -0.0f, 1.0f, 0.0f},
-            (simd_float4){      0.0f,        0.0f, 0.0f, 1.0f},
-        };
+            perspective = simd_float4x4FromGLKMatrix(
+                GLKMatrix4MakePerspective(
+                    M_PI / 2.0f, 1.0f, nearZ, farZ
+                )
+            );
+
+            // Metal clip space is [0,1] rather than [-1,1]
+            // https://forums.raywenderlich.com/t/ios-metal-tutorial-with-swift-part-5-switching-to-metalkit/19283
+            const float zs = farZ / (nearZ - farZ);
+            perspective.columns[2][2] = zs;
+            perspective.columns[3][2] = zs * nearZ;
+        }
+
+        const simd_float4x4 rotation = simd_float4x4FromGLKMatrix(
+            GLKMatrix4MakeRotation(
+                cosf((float)frameNum * 0.05f),
+                0.0f,
+                0.0f,
+                1.0f
+            )
+        );
+
+        const simd_float4x4 scale = simd_float4x4FromGLKMatrix(
+            GLKMatrix4MakeScale(
+                1.0f,
+                1.0f,
+                (sinf((float)frameNum * 0.05f) + 1.5f) * 2.0f
+            )
+        );
 
         FrameUniforms* const uniforms = (FrameUniforms*)[
             _uniformBuffer
             contents
         ];
-        uniforms->projectionViewModel = rotation;
+
+        // matrix_identity_float4x4
+        uniforms->modelMatrix       = simd_mul(rotation, scale);
+        uniforms->perspectiveMatrix = perspective;
     }
 
     {
@@ -190,9 +246,11 @@ typedef struct vertex {
         [encoder setVertexBuffer:_vertfexBuffer
                  offset:0
                  atIndex:MeshVertexBuffer];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+        [encoder setFragmentTexture:_heightmap
+                 atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
                  vertexStart:0
-                 vertexCount:3];
+                 vertexCount:5];
         [encoder endEncoding];
 
         [commandBuffer presentDrawable:view.currentDrawable];

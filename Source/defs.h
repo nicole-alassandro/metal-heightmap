@@ -18,11 +18,4 @@
 enum {
     MeshVertexBuffer = 0,
     FrameUniformBuffer = 1,
-
-    VertexAttributePosition = 0,
-    VertexAttributeColor = 1,
 };
-
-#define SIZEOF_VERTEX_POS (sizeof(float) * 3)
-#define SIZEOF_VERTEX_COLOR (sizeof(unsigned char) * 4)
-#define SIZEOF_VERTEX (SIZEOF_VERTEX_POS + SIZEOF_VERTEX_COLOR)

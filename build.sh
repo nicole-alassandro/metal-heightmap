@@ -86,6 +86,7 @@ clang \
     -framework Cocoa \
     -framework Metal \
     -framework MetalKit \
+    -framework GLKit \
     -fobjc-arc \
     -o "$EXE_BIN" \
     Source/Main.m
