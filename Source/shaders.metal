@@ -32,16 +32,20 @@ struct FragmentInput {
     float2 texture;
 };
 
+constexpr sampler linearSampler (mag_filter::linear,
+                                 min_filter::linear);
+
 vertex FragmentInput vert(
     VertexInput in [[stage_in]],
     constant FrameUniforms& uniforms [[buffer(1)]],
     texture2d<half> heightmap [[texture(0)]])
 {
-    constexpr sampler nearestSampler (mag_filter::linear,
-                                      min_filter::linear);
-
     float2 tex_pos = (in.position.xy + 1.0f) / 2.0f;
-    half sample = heightmap.sample(nearestSampler, float2(tex_pos.x, 1.0f - tex_pos.y)).r;
+
+    half sample = heightmap.sample(
+        linearSampler,
+        float2(tex_pos.x, 1.0f - tex_pos.y)
+    ).r;
 
     FragmentInput out;
 
@@ -60,9 +64,6 @@ fragment half4 frag(
     FragmentInput in [[stage_in]],
     texture2d<half> heightmap [[texture(0)]])
 {
-    constexpr sampler linearSampler (mag_filter::linear,
-                                     min_filter::linear);
-
     half4 color = heightmap.sample(
         linearSampler,
         float2(in.texture.x, 1.0f - in.texture.y)
