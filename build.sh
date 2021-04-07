@@ -83,6 +83,7 @@ cp -r Resources/ "$RES_DIR"
 
 clang \
     -g \
+    -isysroot $(xcrun --show-sdk-path) \
     -framework Cocoa \
     -framework Metal \
     -framework MetalKit \
