@@ -20,8 +20,15 @@ typedef struct FrameUniforms {
 
 typedef struct vertex {
     float pos[2];
-    float tex[2];
 } vertex;
+
+enum {
+    GRID_SIZE = 25,
+    VERTEX_COUNT = GRID_SIZE * GRID_SIZE,
+    INDEX_COUNT = ((GRID_SIZE - 1) * (GRID_SIZE - 1)) * 6,
+
+    MAX_INFLIGHT_BUFFERS = 3,
+};
 
 simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
 {
@@ -42,15 +49,20 @@ simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
     id<MTLCommandQueue>        _commandQueue;
     id<MTLRenderPipelineState> _pipelineState;
     id<MTLDepthStencilState>   _depthState;
-    id<MTLBuffer>              _uniformBuffer;
-    id<MTLBuffer>              _vertfexBuffer;
+    id<MTLBuffer>              _uniformBuffer[MAX_INFLIGHT_BUFFERS];
+    id<MTLBuffer>              _vertexBuffer;
+    id<MTLBuffer>              _indexBuffer;
     id<MTLTexture>             _heightmap;
 
-    long frameNum;
+    size_t _frameNum;
+    dispatch_semaphore_t _frameSemaphore;
 }
 
 -(id)initWithView:(MTKView*)view
 {
+    _frameNum = 0;
+    _frameSemaphore = dispatch_semaphore_create(MAX_INFLIGHT_BUFFERS);
+
     _device = view.device;
 
     view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -105,11 +117,11 @@ simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
     MTLVertexDescriptor* vertDesc = [MTLVertexDescriptor new];
     vertDesc.attributes[0].format = MTLVertexFormatFloat2;
     vertDesc.attributes[0].offset = 0;
-    vertDesc.attributes[0].bufferIndex = MeshVertexBuffer;
+    vertDesc.attributes[0].bufferIndex = 0;
 
-    vertDesc.layouts[MeshVertexBuffer].stride = sizeof(vertex);
-    vertDesc.layouts[MeshVertexBuffer].stepRate = 1;
-    vertDesc.layouts[MeshVertexBuffer].stepFunction = MTLVertexStepFunctionPerVertex;
+    vertDesc.layouts[0].stride = sizeof(vertex);
+    vertDesc.layouts[0].stepRate = 1;
+    vertDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
 
     MTLRenderPipelineDescriptor * pipeDesc = [MTLRenderPipelineDescriptor new];
     pipeDesc.sampleCount = view.sampleCount;
@@ -131,38 +143,66 @@ simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
         [NSApp terminate:self];
     }
 
-    vertex verts[5] = {
-        (vertex){
-            .pos={-0.5f, -0.5f},
-        },
-        (vertex){
-            .pos={-0.5f, 0.5f},
-        },
-        (vertex){
-            .pos={0.5f, 0.5f},
-        },
-        (vertex){
-            .pos={0.5f, -0.5f},
-        },
-        (vertex){
-            .pos={-0.5f, -0.5f},
-        },
-    };
+    {
+        vertex   * const vertices = malloc(sizeof(vertex)   * VERTEX_COUNT);
+        uint16_t * const indices  = malloc(sizeof(uint16_t) * INDEX_COUNT);
 
-    _vertfexBuffer = [
-        _device
-        newBufferWithBytes:verts
-        length:sizeof(verts)
-        options:MTLResourceStorageModeShared
-    ];
+        size_t vi = 0;
+        size_t ii = 0;
 
-    _uniformBuffer = [
-        _device
-        newBufferWithLength:sizeof(FrameUniforms)
-        options:MTLResourceCPUCacheModeWriteCombined
-    ];
+        for (size_t y = 0; y < GRID_SIZE; ++y) {
+            for (size_t x = 0; x < GRID_SIZE; ++x) {
+                vertices[vi++] = (vertex){
+                    .pos={
+                        ((float)x / (float)(GRID_SIZE - 1)) * 2.0f - 1.0f,
+                        ((float)y / (float)(GRID_SIZE - 1)) * 2.0f - 1.0f,
+                    }
+                };
 
-    frameNum = 0;
+                if (y < GRID_SIZE - 1 && x < GRID_SIZE - 1)
+                {
+                    const size_t leftTop     = y * GRID_SIZE + x;
+                    const size_t leftBottom  = (y + 1) * GRID_SIZE + x;
+                    const size_t rightBottom = (y + 1) * GRID_SIZE + x + 1;
+                    const size_t rightTop    = y * GRID_SIZE + x + 1;
+
+                    indices[ii++] = rightTop;
+                    indices[ii++] = leftBottom;
+                    indices[ii++] = leftTop;
+
+                    indices[ii++] = rightBottom;
+                    indices[ii++] = leftBottom;
+                    indices[ii++] = rightTop;
+                }
+            }
+        }
+
+        _vertexBuffer = [
+            _device
+            newBufferWithBytes:vertices
+            length:sizeof(vertex) * VERTEX_COUNT
+            options:MTLResourceStorageModeShared
+        ];
+
+        _indexBuffer = [
+            _device
+            newBufferWithBytes:indices
+            length:sizeof(uint16_t) * INDEX_COUNT
+            options:MTLResourceStorageModeShared
+        ];
+
+        free(vertices);
+        free(indices);
+    }
+
+    for (size_t i = 0; i < MAX_INFLIGHT_BUFFERS; ++i)
+    {
+        _uniformBuffer[i] = [
+            _device
+            newBufferWithLength:sizeof(FrameUniforms)
+            options:MTLResourceCPUCacheModeWriteCombined
+        ];
+    }
 
     _commandQueue = [_device newCommandQueue];
 
@@ -171,57 +211,73 @@ simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
 
 -(void)drawInMTKView:(MTKView*)view
 {
+    dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
+
     MTLRenderPassDescriptor* renderPassDescriptor = view.currentRenderPassDescriptor;
     if (!renderPassDescriptor)
         return;
 
-    frameNum++;
+    const size_t bufferIndex = _frameNum % MAX_INFLIGHT_BUFFERS;
 
     {
-        simd_float4x4 perspective;
+        simd_float4x4 perspectiveMatrix;
 
         {
             const float nearZ = 0.01f;
             const float farZ  = 100.0f;
 
-            perspective = simd_float4x4FromGLKMatrix(
+            perspectiveMatrix = simd_float4x4FromGLKMatrix(
                 GLKMatrix4MakePerspective(
-                    M_PI / 2.0f, 1.0f, nearZ, farZ
+                    M_PI / 4.0f, 1.0f, nearZ, farZ
                 )
             );
 
             // Metal clip space is [0,1] rather than [-1,1]
             // https://forums.raywenderlich.com/t/ios-metal-tutorial-with-swift-part-5-switching-to-metalkit/19283
             const float zs = farZ / (nearZ - farZ);
-            perspective.columns[2][2] = zs;
-            perspective.columns[3][2] = zs * nearZ;
+            perspectiveMatrix.columns[2][2] = zs;
+            perspectiveMatrix.columns[3][2] = zs * nearZ;
         }
 
-        const simd_float4x4 rotation = simd_float4x4FromGLKMatrix(
-            GLKMatrix4MakeRotation(
-                cosf((float)frameNum * 0.05f),
+        simd_float4x4 modelMatrix = simd_float4x4FromGLKMatrix(
+            GLKMatrix4MakeTranslation(
                 0.0f,
                 0.0f,
-                1.0f
+                -4.0f
             )
         );
 
-        const simd_float4x4 scale = simd_float4x4FromGLKMatrix(
-            GLKMatrix4MakeScale(
-                1.0f,
-                1.0f,
-                (sinf((float)frameNum * 0.05f) + 1.5f) * 2.0f
+        modelMatrix = simd_mul(
+            modelMatrix,
+            simd_float4x4FromGLKMatrix(
+                GLKMatrix4MakeRotation(
+                    M_PI / 2.0f,
+                    -1.0f,
+                    0.0f,
+                    0.0f
+                )
+            )
+        );
+
+        modelMatrix = simd_mul(
+            modelMatrix,
+            simd_float4x4FromGLKMatrix(
+                GLKMatrix4MakeRotation(
+                    cosf((float)_frameNum * 0.0275f),
+                    0.0f,
+                    0.0f,
+                    1.0f
+                )
             )
         );
 
         FrameUniforms* const uniforms = (FrameUniforms*)[
-            _uniformBuffer
+            _uniformBuffer[bufferIndex]
             contents
         ];
 
-        // matrix_identity_float4x4
-        uniforms->modelMatrix       = simd_mul(rotation, scale);
-        uniforms->perspectiveMatrix = perspective;
+        uniforms->modelMatrix       = modelMatrix;
+        uniforms->perspectiveMatrix = perspectiveMatrix;
     }
 
     {
@@ -240,22 +296,38 @@ simd_float4x4 simd_float4x4FromGLKMatrix(GLKMatrix4 mat)
 
         [encoder setDepthStencilState:_depthState];
         [encoder setRenderPipelineState:_pipelineState];
-        [encoder setVertexBuffer:_uniformBuffer
+        [encoder setVertexBuffer:_uniformBuffer[bufferIndex]
                  offset:0
-                 atIndex:FrameUniformBuffer];
-        [encoder setVertexBuffer:_vertfexBuffer
+                 atIndex:1];
+        [encoder setVertexBuffer:_vertexBuffer
                  offset:0
-                 atIndex:MeshVertexBuffer];
+                 atIndex:0];
+
+        [encoder setVertexTexture:_heightmap
+                 atIndex:0];
         [encoder setFragmentTexture:_heightmap
                  atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
-                 vertexStart:0
-                 vertexCount:5];
+
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                 indexCount:INDEX_COUNT
+                 indexType:MTLIndexTypeUInt16
+                 indexBuffer:_indexBuffer
+                 indexBufferOffset:0
+                 instanceCount:1];
+
         [encoder endEncoding];
 
         [commandBuffer presentDrawable:view.currentDrawable];
+
+        __weak dispatch_semaphore_t semaphore = _frameSemaphore;
+        [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer){
+            dispatch_semaphore_signal(semaphore);
+        }];
+
         [commandBuffer commit];
     }
+
+    _frameNum++;
 }
 
 -(void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}

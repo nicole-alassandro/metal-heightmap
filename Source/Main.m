@@ -20,8 +20,8 @@
 #import <GLKit/GLKit.h>
 
 #include <math.h>
+#include <simd/simd.h>
 
-#include "defs.h"
 #include "Renderer.m"
 #include "AppDelegate.m"
 

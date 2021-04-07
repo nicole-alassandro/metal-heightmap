@@ -14,7 +14,7 @@
 // with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <metal_stdlib>
-#include "defs.h"
+#include <simd/simd.h>
 
 using namespace metal;
 
@@ -34,22 +34,25 @@ struct FragmentInput {
 
 vertex FragmentInput vert(
     VertexInput in [[stage_in]],
-    constant FrameUniforms& uniforms [[buffer(FrameUniformBuffer)]],
+    constant FrameUniforms& uniforms [[buffer(1)]],
     texture2d<half> heightmap [[texture(0)]])
 {
-    constexpr sampler nearestSampler (mag_filter::nearest,
-                                      min_filter::nearest);
+    constexpr sampler nearestSampler (mag_filter::linear,
+                                      min_filter::linear);
 
-    // TODO
-    half4 sample = heightmap.sample(nearestSampler, in.position);
+    float2 tex_pos = (in.position.xy + 1.0f) / 2.0f;
+    half sample = heightmap.sample(nearestSampler, float2(tex_pos.x, 1.0f - tex_pos.y)).r;
 
     FragmentInput out;
+
     out.position = (
-        uniforms.perspectiveMatrix
-      * uniforms.modelMatrix
-      * float4(in.position, -1.0, 1.0)
+        uniforms.perspectiveMatrix *
+        uniforms.modelMatrix *
+        float4(in.position, sample * 2.0f - 1.0f, 1.0)
     );
-    out.texture = (in.position.xy + 1.0f) / 2.0f;
+
+    out.texture = tex_pos;
+
     return out;
 }
 
@@ -60,7 +63,10 @@ fragment half4 frag(
     constexpr sampler linearSampler (mag_filter::linear,
                                      min_filter::linear);
 
-    half4 color = heightmap.sample(linearSampler, in.texture);
-    // return half4(in.texture.x, in.texture.y, 255, 255);
-    return half4(color.r, color.r, color.r, 0);
+    half4 color = heightmap.sample(
+        linearSampler,
+        float2(in.texture.x, 1.0f - in.texture.y)
+    );
+
+    return half4(color.r, color.r, color.r, 1.0f);
 }
